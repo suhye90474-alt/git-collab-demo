@@ -9,6 +9,8 @@
        python scan.py --date 20261014 --min-value 1000
 """
 import argparse
+import getpass
+import os
 import sys
 from datetime import datetime, timedelta
 
@@ -60,6 +62,20 @@ def _stock():
     return stock
 
 
+def ensure_krx_login():
+    """pykrx 1.2+ 는 KRX 데이터 마켓플레이스(data.krx.co.kr) 로그인이 필요합니다.
+
+    환경변수 KRX_ID / KRX_PW 가 없으면 실행 시 직접 입력받습니다(비밀번호는 저장하지 않음).
+    """
+    if os.getenv("KRX_ID") and os.getenv("KRX_PW"):
+        return
+    print("KRX 로그인이 필요합니다 (data.krx.co.kr 무료 회원가입 계정).")
+    if not sys.stdin.isatty():
+        sys.exit("환경변수 KRX_ID, KRX_PW 를 설정하세요.")
+    os.environ["KRX_ID"] = input("KRX 아이디: ").strip()
+    os.environ["KRX_PW"] = getpass.getpass("KRX 비밀번호(입력 내용은 화면에 안 보임): ")
+
+
 def trading_days(stock, end: str, n: int) -> list:
     start = (datetime.strptime(end, "%Y%m%d") - timedelta(days=n * 2 + 20)).strftime("%Y%m%d")
     idx = stock.get_index_ohlcv_by_date(start, end, INDEX_CODE["KOSPI"])
@@ -68,6 +84,7 @@ def trading_days(stock, end: str, n: int) -> list:
 
 def run(args) -> pd.DataFrame:
     stock = _stock()
+    ensure_krx_login()
     end = args.date or datetime.now().strftime("%Y%m%d")
     days = trading_days(stock, end, args.days + 25)
     if len(days) < args.days + 1:
