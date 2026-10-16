@@ -18,11 +18,12 @@ KRX 데이터(pykrx)로 코스피·코스닥 거래대금 상위 종목을 가�
 ## 실행 (본인 PC)
 ```
 pip install -r requirements.txt
-python scan.py                      # 최근 거래일, 3조건 모두 충족 종목 출력
+python scan.py                      # 날짜를 물어봄 (엔터 = 오늘). 3조건 모두 충족 종목 출력
+python scan.py --date 2026-10-14    # 그날 데이터 기준으로 분석 (휴장일이면 직전 거래일)
 python scan.py --all                # 거래대금 상위 전체와 조건별 충족 여부
 python scan.py --min-value 1000 --days 3 --top 50
-python scan.py --date 20261014
 ```
+`당일유형` 열: 지수 하락일에 오른/덜 빠진 종목은 "방어", 지수 상승일에 10% 이상 오른 종목은 "탄력".
 결과는 `leaders_YYYYMMDD.csv`로도 저장됩니다(엑셀에서 열 수 있음).
 
 ## 주의

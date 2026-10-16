@@ -1,5 +1,5 @@
 import pandas as pd
-from scan import evaluate, recent_surge_candle
+from scan import classify_day, evaluate, normalize_date, recent_surge_candle
 
 
 def test_evaluate_filters_and_relative_strength():
@@ -22,3 +22,22 @@ def test_surge_candle():
     hist.loc[n - 5, ["시가", "종가", "거래량"]] = [100, 115, 5000]
     hist.loc[n - 4:, ["시가", "종가"]] = 115
     assert recent_surge_candle(hist, 20, 3, 10)
+
+
+def test_classify_day():
+    assert classify_day(-1.0, 2.0, 3.0) == "방어(하락장 상승)"
+    assert classify_day(-1.0, -0.3, 1.0) == "방어(덜 하락)"
+    assert classify_day(-1.0, -2.0, 0.0) == "-"
+    assert classify_day(1.0, 12.0, 15.0) == "탄력(10%+)"
+    assert classify_day(1.0, 3.0, 4.0) == "-"
+
+
+def test_normalize_date():
+    assert normalize_date("2026-10-14") == "20261014"
+    assert normalize_date("2026.10.14") == "20261014"
+    assert normalize_date("20261014") == "20261014"
+    try:
+        normalize_date("2026-13-40")
+        assert False
+    except ValueError:
+        pass

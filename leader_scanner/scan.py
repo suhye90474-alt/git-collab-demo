@@ -5,8 +5,9 @@
   2. 최근 N일(기본 5) 수익률이 해당 시장 지수 수익률보다 높음 (지수 하락 시 덜 하락하거나 플러스 유지)
   3. 당일 고가 등락률 >= 10%  또는  최근 20일 내 거래량 급증(직전 평균의 N배) 장대양봉
 
-사용:  python scan.py            # 가장 최근 거래일 기준
-       python scan.py --date 20261014 --min-value 1000
+사용:  python scan.py                      # 날짜를 물어봄 (엔터 = 오늘)
+       python scan.py --date 20261014      # 그날 데이터 기준으로 분석
+       python scan.py --date 2026-10-14 --min-value 1000
 """
 import argparse
 import getpass
@@ -53,6 +54,29 @@ def evaluate(today: pd.DataFrame, ref_close: pd.Series, index_ret: float,
     return df.sort_values("거래대금(억)", ascending=False)
 
 
+def normalize_date(text: str) -> str:
+    """'2026-10-14', '2026.10.14', '20261014' -> '20261014'. 잘못된 형식이면 ValueError."""
+    digits = "".join(ch for ch in text if ch.isdigit())
+    datetime.strptime(digits, "%Y%m%d")
+    return digits
+
+
+def classify_day(index_day_ret: float, ret: float, high_ret: float) -> str:
+    """분석일 하루 기준 종목 유형.
+
+    지수 하락일: 종목이 플러스면 '방어(하락장 상승)', 지수보다 덜 빠졌으면 '방어(덜 하락)'.
+    지수 상승일: 당일 등락률 또는 고가 변동률이 10% 이상이면 '탄력(10%+)'.
+    """
+    if index_day_ret < 0:
+        if ret > 0:
+            return "방어(하락장 상승)"
+        if ret > index_day_ret:
+            return "방어(덜 하락)"
+    elif ret >= 10 or high_ret >= 10:
+        return "탄력(10%+)"
+    return "-"
+
+
 # ---------------------------------------------------------------- data access
 def _stock():
     try:
@@ -85,12 +109,14 @@ def trading_days(stock, end: str, n: int) -> list:
 def run(args) -> pd.DataFrame:
     stock = _stock()
     ensure_krx_login()
-    end = args.date or datetime.now().strftime("%Y%m%d")
+    end = args.date
     days = trading_days(stock, end, args.days + 25)
     if len(days) < args.days + 1:
         sys.exit("거래일 데이터를 가져오지 못했습니다. 날짜/네트워크를 확인하세요.")
     base, ref = days[-1], days[-1 - args.days]
-    print(f"기준일 {base}, 비교일 {ref} ({args.days}거래일 전)")
+    if base != end:
+        print(f"※ {end}은(는) 휴장일이거나 데이터가 없어 직전 거래일 {base} 기준으로 분석합니다.")
+    print(f"분석일 {base}, 비교일 {ref} ({args.days}거래일 전)")
 
     rows = []
     for market, icode in INDEX_CODE.items():
@@ -102,6 +128,8 @@ def run(args) -> pd.DataFrame:
         today = stock.get_market_ohlcv_by_ticker(base, market=market)
         ref_close = stock.get_market_ohlcv_by_ticker(ref, market=market)["종가"]
         df = evaluate(today, ref_close, index_ret, args.min_value)
+        df["당일유형"] = [classify_day(idx_today, r, h)
+                      for r, h in zip(df["등락률"], df["고가변동률"])]
         df["시장"] = market
         rows.append(df)
 
@@ -119,12 +147,13 @@ def run(args) -> pd.DataFrame:
     df["②상대강도"] = df["상대강도"] > 0
     df["③탄력성"] = (df["고가변동률"] >= 10) | df["최근장대양봉"]
     df["충족수"] = df[["①거래대금", "②상대강도", "③탄력성"]].sum(axis=1)
+    df.attrs["base"] = base
     return df
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    p.add_argument("--date", help="기준일 YYYYMMDD (기본: 오늘/가장 최근 거래일)")
+    p.add_argument("--date", help="분석할 날짜 YYYYMMDD 또는 YYYY-MM-DD (생략하면 실행 시 물어봄)")
     p.add_argument("--min-value", type=float, default=500, help="최소 거래대금(억원)")
     p.add_argument("--days", type=int, default=5, help="상대강도 비교 거래일 수")
     p.add_argument("--top", type=int, default=30, help="거래대금 상위 N개만 검사")
@@ -135,15 +164,23 @@ def main():
     p.add_argument("--out", help="CSV 저장 경로 (기본: leaders_YYYYMMDD.csv)")
     args = p.parse_args()
 
+    if not args.date:
+        default = datetime.now().strftime("%Y%m%d")
+        args.date = input(f"분석할 날짜 (예: 20261014, 엔터={default}): ").strip() or default
+    try:
+        args.date = normalize_date(args.date)
+    except ValueError:
+        sys.exit("날짜 형식이 올바르지 않습니다. 예: 20261014 또는 2026-10-14")
+
     df = run(args)
     cols = ["시장", "종목명", "종가", "등락률", "거래대금(억)", "고가변동률",
-            "Nd수익률", "상대강도", "최근장대양봉", "충족수"]
+            "Nd수익률", "상대강도", "최근장대양봉", "당일유형", "충족수"]
     show = df if args.all else df[df["충족수"] == 3]
     pd.set_option("display.width", 200, "display.unicode.east_asian_width", True)
     fmt = show[cols].rename(columns={"Nd수익률": f"{args.days}일수익률"})
     print("\n" + (fmt.round(2).to_string() if len(fmt) else "3조건 모두 충족한 종목이 없습니다. --all 로 전체 확인"))
 
-    out = args.out or f"leaders_{datetime.now():%Y%m%d}.csv"
+    out = args.out or f"leaders_{df.attrs['base']}.csv"
     df.to_csv(out, encoding="utf-8-sig")
     print(f"\n전체 {len(df)}종목 결과 저장: {out}")
 
