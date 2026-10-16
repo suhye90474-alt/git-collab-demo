@@ -184,3 +184,18 @@ def test_group_without_strong_stock_has_no_leader():
     m = mark_leaders(score(df, pd.Series(False, index=df.index)))
     assert not m["대장"].any()
     assert (group_summary(m)["대장주"] == "(없음)").all()
+
+
+def test_build_theme_json_groups_and_orders():
+    from scan import build_theme_json
+    top = pd.DataFrame({
+        "종목명": ["A", "B", "C", "D", "E"],
+        "거래대금(억)": [100, 900, 500, 300, 50],
+    })
+    sectors = ["전기전자", "전기전자", "제약", "제약", "화학"]
+    out = build_theme_json(top, sectors, {"A": "반도체 장비"})
+    # A 는 수동 테마, 전기전자는 B 하나뿐이라 기타, 화학(E)도 하나뿐이라 기타
+    assert out["제약"] == ["C", "D"]
+    assert out["반도체 장비"] == ["A"]
+    assert sorted(out["기타"]) == ["B", "E"]
+    assert list(out)[0] == "기타"            # 거래대금 합계(950) 순

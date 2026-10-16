@@ -117,6 +117,24 @@ def mark_leaders(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def build_theme_json(top: pd.DataFrame, sectors, manual: dict) -> dict:
+    """거래대금 상위 종목을 그룹(수동 테마 > KRX 업종)별로 묶어 themes.json 형식으로.
+
+    top: 종목명/거래대금(억) 컬럼. sectors: top 과 같은 순서의 업종명. manual: {종목명: 테마}.
+    그룹은 소속 종목의 거래대금 합계가 큰 순서, 그룹 안은 거래대금 순. 종목이 1개뿐인 그룹은 '기타'로 합침.
+    """
+    groups = assign_groups(top["종목명"], sectors, manual)
+    d = top.assign(그룹=groups)
+    counts = d["그룹"].value_counts()
+    d["그룹"] = [g if counts[g] > 1 or g in set(manual.values()) else "기타" for g in d["그룹"]]
+    order = d.groupby("그룹")["거래대금(억)"].sum().sort_values(ascending=False).index
+    out = {}
+    for g in order:
+        sub = d[d["그룹"] == g].sort_values("거래대금(억)", ascending=False)
+        out[g] = list(sub["종목명"])
+    return out
+
+
 def sort_results(df: pd.DataFrame) -> pd.DataFrame:
     """충족수 내림차순, 같으면 등락률 내림차순."""
     return df.sort_values(["충족수", "등락률"], ascending=[False, False])
@@ -187,6 +205,39 @@ def fetch_sectors(stock, base: str) -> pd.Series:
         except Exception as e:  # 네트워크/인증/스키마 변경 등
             print(f"  (업종 정보를 가져오지 못했습니다: {market}: {e})")
     return pd.concat(parts) if parts else pd.Series(dtype=object)
+
+
+def export_themes(args):
+    """거래대금 상위 N종목(코스피+코스닥)을 업종/테마로 묶어 JSON 파일로 저장."""
+    stock = _stock()
+    ensure_krx_login()
+    days = trading_days(stock, args.date, 5)
+    base = days[-1]
+    parts = []
+    for market in INDEX_CODE:
+        t = stock.get_market_ohlcv_by_ticker(base, market=market)
+        t = t.assign(시장=market)
+        parts.append(t)
+    top = pd.concat([p for p in parts if len(p)])
+    top["거래대금(억)"] = top["거래대금"] / 1e8
+    top = top.sort_values("거래대금(억)", ascending=False).head(args.build_themes)
+    top["종목명"] = [stock.get_market_ticker_name(t) for t in top.index]
+    sectors = fetch_sectors(stock, base).reindex(top.index)
+    themes = build_theme_json(top, sectors, load_themes())
+
+    result = {"_설명": f"{base} 거래대금 상위 {len(top)}종목을 수동 테마(themes.json) > KRX 업종 순으로 묶음. "
+                      "필요한 항목을 themes.json 으로 옮겨 쓰세요."}
+    result.update(themes)
+    out = args.out or f"themes_top{len(top)}_{base}.json"
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+    csv_out = os.path.splitext(out)[0] + ".csv"
+    top.assign(순위=range(1, len(top) + 1))[["순위", "시장", "종목명", "종가", "등락률", "거래대금(억)"]] \
+        .to_csv(csv_out, index=False, encoding="utf-8-sig")
+    print(f"분석일 {base}: 상위 {len(top)}종목 -> {len(themes)}개 그룹")
+    for g, names in themes.items():
+        print(f"  {g} ({len(names)}): {', '.join(names[:6])}{' ...' if len(names) > 6 else ''}")
+    print(f"\n저장: {os.path.abspath(out)}\n      {os.path.abspath(csv_out)}")
 
 
 def trading_days(stock, end: str, n: int) -> list:
@@ -270,6 +321,8 @@ def main():
     p.add_argument("--no-auto", dest="auto", action="store_false",
                    help="장대양봉 기준 자동 완화를 끄고 --vol-mult/--body-pct 고정 사용")
     p.add_argument("--min-hits", type=int, default=3, help="3조건 충족 종목이 이보다 적으면 기준을 단계적으로 완화")
+    p.add_argument("--build-themes", type=int, nargs="?", const=200, metavar="N",
+                   help="분석 대신 거래대금 상위 N(기본 200)종목을 업종/테마로 묶어 JSON 으로 저장")
     p.add_argument("--all", action="store_true", help="3조건 모두 충족하지 않는 종목도 출력")
     p.add_argument("--out", help="CSV 저장 경로 (기본: leaders_YYYYMMDD.csv)")
     args = p.parse_args()
@@ -281,6 +334,10 @@ def main():
         args.date = normalize_date(args.date)
     except ValueError:
         sys.exit("날짜 형식이 올바르지 않습니다. 예: 20261014 또는 2026-10-14")
+
+    if args.build_themes:
+        export_themes(args)
+        return
 
     df = run(args)
     df["대장"] = df["대장"].map({True: "★", False: ""})
