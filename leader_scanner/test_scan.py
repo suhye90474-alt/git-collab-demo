@@ -80,7 +80,7 @@ def test_sort_by_score_then_change():
 
 
 def test_group_summary_picks_leader():
-    df = score(_sample(), pd.Series({"a": False, "b": False, "c": True, "d": False}))
+    df = mark_leaders(score(_sample(), pd.Series({"a": False, "b": False, "c": True, "d": False})))
     s = group_summary(df).set_index("그룹")
     assert s.loc["반도체", "대장주"] == "A" and s.loc["반도체", "3조건충족"] == 1
     assert s.index[0] == "반도체"                        # 3조건 충족이 있는 그룹이 먼저
@@ -164,3 +164,23 @@ def test_csv_save_falls_back_when_locked(monkeypatch, tmp_path, capsys):
     scan.main()
     assert len(calls) == 2 and calls[0] != calls[1]
     assert (tmp_path / calls[1]).exists()
+
+
+def test_weak_day_stock_fails_condition2_and_cannot_lead():
+    df = _sample()
+    df["지수당일"] = -5.0
+    df.loc["a", "등락률"] = -10.0           # 거래대금 1위지만 지수보다 약함
+    s = score(df, pd.Series({"a": True, "b": False, "c": False, "d": False}))
+    assert not s.loc["a", "②상대강도"]       # 5일 상대강도는 +1 이어도 당일이 약하면 탈락
+    m = mark_leaders(s)
+    assert not m.loc["a", "대장"] and m.loc["b", "대장"]      # 반도체 대장은 B
+    summ = group_summary(m).set_index("그룹")
+    assert summ.loc["반도체", "거래대금1위"] == "A"
+
+
+def test_group_without_strong_stock_has_no_leader():
+    df = _sample()
+    df["지수당일"] = 10.0                    # 모두 지수보다 약함
+    m = mark_leaders(score(df, pd.Series(False, index=df.index)))
+    assert not m["대장"].any()
+    assert (group_summary(m)["대장주"] == "(없음)").all()

@@ -2,7 +2,7 @@
 
 조건
   1. 당일 거래대금 >= --min-value (억원, 기본 500)
-  2. 최근 N일(기본 5) 수익률이 해당 시장 지수 수익률보다 높음 (지수 하락 시 덜 하락하거나 플러스 유지)
+  2. 최근 N일(기본 5) 수익률이 해당 시장 지수보다 높고, 분석일 당일 등락률도 지수보다 높음
   3. 당일 고가 등락률 >= 10%  또는  최근 20일 내 거래량 급증(직전 평균의 N배) 장대양봉
 
 사용:  python scan.py                      # 날짜를 물어봄 (엔터 = 오늘)
@@ -45,7 +45,7 @@ def recent_surge_candle(hist: pd.DataFrame, lookback: int, vol_mult: float,
 
 
 def evaluate(today: pd.DataFrame, ref_close: pd.Series, index_ret: float,
-             min_value_eok: float) -> pd.DataFrame:
+             min_value_eok: float, idx_day_ret: float = None) -> pd.DataFrame:
     """조건 1·2와 당일 고가 변동률을 계산. today: 티커 인덱스, 컬럼 종가/고가/거래대금/등락률."""
     df = today.copy()
     df["거래대금(억)"] = df["거래대금"] / 1e8
@@ -55,6 +55,8 @@ def evaluate(today: pd.DataFrame, ref_close: pd.Series, index_ret: float,
     df["Nd수익률"] = (df["종가"] / ref_close.reindex(df.index) - 1) * 100
     df["지수Nd"] = index_ret
     df["상대강도"] = df["Nd수익률"] - index_ret
+    if idx_day_ret is not None:
+        df["지수당일"] = idx_day_ret
     return df.sort_values("거래대금(억)", ascending=False)
 
 
@@ -101,10 +103,17 @@ def assign_groups(names, sectors, theme_of: dict) -> list:
 
 
 def mark_leaders(df: pd.DataFrame) -> pd.DataFrame:
-    """그룹별로 거래대금이 가장 큰 종목을 대장주로 표시('대장' 컬럼). '기타'는 제외."""
+    """그룹별 대장주('대장' 컬럼). '기타' 그룹은 제외.
+
+    대장 = 그룹 안에서 '당일 지수보다 덜 빠졌거나 오른' 종목 중 거래대금 1위.
+    그룹 전체가 지수보다 약했다면 대장 없음(거래대금만 큰 약세 종목을 대장으로 보지 않기 위해).
+    """
     df = df.copy()
-    top = df.groupby("그룹")["거래대금(억)"].transform("max")
-    df["대장"] = (df["거래대금(억)"] == top) & (df["그룹"] != "기타")
+    ok = df["등락률"] > df["지수당일"] if "지수당일" in df else pd.Series(True, index=df.index)
+    ok &= df["그룹"] != "기타"
+    val = df["거래대금(억)"].where(ok)
+    top = val.groupby(df["그룹"]).transform("max")
+    df["대장"] = ok & (val == top)
     return df
 
 
@@ -118,20 +127,29 @@ def score(df: pd.DataFrame, surge: pd.Series) -> pd.DataFrame:
     df["최근장대양봉"] = surge
     df["①거래대금"] = True
     df["②상대강도"] = df["상대강도"] > 0
+    if "지수당일" in df:       # 5일 상대강도 + 당일에도 지수보다 강해야 함
+        df["②상대강도"] &= df["등락률"] > df["지수당일"]
     df["③탄력성"] = (df["고가변동률"] >= 10) | df["최근장대양봉"]
     df["충족수"] = df[["①거래대금", "②상대강도", "③탄력성"]].sum(axis=1)
     return df
 
 
 def group_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """그룹별 요약: 대장주, 대장 등락률, 종목 수, 3조건 충족 수. 충족 많은 그룹 먼저."""
+    """그룹별 요약. df 에는 '대장' 컬럼(mark_leaders 결과)이 있어야 함. 3조건 충족 많은 그룹 먼저."""
     rows = []
     for g, sub in df.groupby("그룹"):
-        lead = sub.sort_values("거래대금(억)", ascending=False).iloc[0]
+        top_val = sub.sort_values("거래대금(억)", ascending=False).iloc[0]
+        lead = sub[sub["대장"]]
+        lead = lead.iloc[0] if len(lead) else None
         rows.append({
-            "그룹": g, "대장주": lead["종목명"], "대장등락률": lead["등락률"],
-            "대장거래대금(억)": lead["거래대금(억)"], "종목수": len(sub),
-            "3조건충족": int((sub["충족수"] == 3).sum()), "최대충족수": int(sub["충족수"].max()),
+            "그룹": g,
+            "대장주": lead["종목명"] if lead is not None else "(없음)",
+            "대장등락률": float(lead["등락률"]) if lead is not None else float("nan"),
+            "거래대금1위": top_val["종목명"],
+            "1위등락률": float(top_val["등락률"]),
+            "종목수": len(sub),
+            "3조건충족": int((sub["충족수"] == 3).sum()),
+            "최대충족수": int(sub["충족수"].max()),
         })
     out = pd.DataFrame(rows)
     return out.sort_values(["3조건충족", "최대충족수", "대장등락률"], ascending=False) if len(out) else out
@@ -198,7 +216,7 @@ def run(args) -> pd.DataFrame:
 
         today = stock.get_market_ohlcv_by_ticker(base, market=market)
         ref_close = stock.get_market_ohlcv_by_ticker(ref, market=market)["종가"]
-        df = evaluate(today, ref_close, index_ret, args.min_value)
+        df = evaluate(today, ref_close, index_ret, args.min_value, idx_today)
         df["당일유형"] = [classify_day(idx_today, r, h)
                       for r, h in zip(df["등락률"], df["고가변동률"])]
         df["시장"] = market
@@ -268,15 +286,17 @@ def main():
     df["대장"] = df["대장"].map({True: "★", False: ""})
     cols = ["그룹", "대장", "시장", "종목명", "종가", "등락률", "거래대금(억)", "고가변동률",
             "Nd수익률", "상대강도", "최근장대양봉", "당일유형", "충족수"]
+    if "지수당일" in df:
+        cols.insert(cols.index("등락률") + 1, "지수당일")
     show = df if args.all else df[df["충족수"] == 3]
     pd.set_option("display.width", 220, "display.unicode.east_asian_width", True)
     fmt = show[cols].rename(columns={"Nd수익률": f"{args.days}일수익률"})
     print("\n[종목 목록: 충족수↓, 등락률↓]")
-    print(fmt.round(2).to_string() if len(fmt) else "3조건 모두 충족한 종목이 없습니다. --all 로 전체 확인")
+    print(fmt.to_string(float_format=lambda v: f"{v:,.2f}") if len(fmt) else "3조건 모두 충족한 종목이 없습니다. --all 로 전체 확인")
 
     summ = group_summary(df.assign(대장=df["대장"] == "★"))
-    print("\n[섹터/테마별 대장주]  (대장 = 그룹 내 거래대금 1위, 스캔한 상위 종목 기준)")
-    print(summ.round(2).to_string(index=False))
+    print("\n[섹터/테마별 대장주]  (대장 = 그룹 내 '당일 지수보다 강한' 종목 중 거래대금 1위, 없으면 (없음))")
+    print(summ.to_string(index=False, float_format=lambda v: f"{v:,.2f}"))
 
     out = args.out or f"leaders_{df.attrs['base']}.csv"
     try:
