@@ -279,8 +279,15 @@ def main():
     print(summ.round(2).to_string(index=False))
 
     out = args.out or f"leaders_{df.attrs['base']}.csv"
-    df.to_csv(out, encoding="utf-8-sig")
-    print(f"\n전체 {len(df)}종목 결과 저장: {out}")
+    try:
+        df.to_csv(out, encoding="utf-8-sig")
+    except PermissionError:
+        # 같은 이름의 파일이 엑셀 등에서 열려 있으면 쓸 수 없음 -> 시각을 붙인 새 이름으로 저장
+        root, ext = os.path.splitext(out)
+        out = f"{root}_{datetime.now():%H%M%S}{ext}"
+        print(f"\n(기존 파일이 열려 있어 새 이름으로 저장합니다)")
+        df.to_csv(out, encoding="utf-8-sig")
+    print(f"\n전체 {len(df)}종목 결과 저장: {os.path.abspath(out)}")
 
 
 if __name__ == "__main__":

@@ -139,3 +139,28 @@ def test_run_end_to_end_with_fake_krx(monkeypatch):
     assert r["충족수"] == 3 and r["그룹"] == "2차전지" and r["대장"]   # themes.json 의 에코프로
     assert r["당일유형"] == "탄력(10%+)" or r["당일유형"].startswith("방어")
     assert df.attrs["base"] == "20261014"
+
+
+def test_csv_save_falls_back_when_locked(monkeypatch, tmp_path, capsys):
+    import scan
+    df = scan.score(_sample(), pd.Series({"a": False, "b": False, "c": True, "d": False}))
+    df["대장"] = True
+    for c in ["시장", "종가", "Nd수익률", "당일유형"]:
+        df[c] = 0
+    df.attrs["base"] = "20261014"
+    monkeypatch.setattr(scan, "run", lambda a: df)
+    real = pd.DataFrame.to_csv
+    calls = []
+
+    def fake(self, path, **kw):
+        calls.append(path)
+        if len(calls) == 1:
+            raise PermissionError(13, "denied")
+        return real(self, path, **kw)
+
+    monkeypatch.setattr(pd.DataFrame, "to_csv", fake)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.argv", ["scan.py", "--date", "20261014"])
+    scan.main()
+    assert len(calls) == 2 and calls[0] != calls[1]
+    assert (tmp_path / calls[1]).exists()
