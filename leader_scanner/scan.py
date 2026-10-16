@@ -11,6 +11,7 @@
 """
 import argparse
 import getpass
+import json
 import os
 import sys
 from datetime import datetime, timedelta
@@ -18,6 +19,9 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 INDEX_CODE = {"KOSPI": "1001", "KOSDAQ": "2001"}
+THEMES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "themes.json")
+# 장대양봉 기준 단계: (거래량 배수, 최소 상승률%). --auto 일 때 충족 종목이 적으면 순서대로 완화.
+SURGE_LEVELS = [(3.0, 10.0), (2.0, 7.0), (1.5, 5.0)]
 
 
 def recent_surge_candle(hist: pd.DataFrame, lookback: int, vol_mult: float,
@@ -77,6 +81,62 @@ def classify_day(index_day_ret: float, ret: float, high_ret: float) -> str:
     return "-"
 
 
+def load_themes(path: str = THEMES_FILE) -> dict:
+    """themes.json -> {종목명: 테마명}. 파일이 없거나 깨져 있으면 빈 dict."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return {name: theme for theme, names in raw.items()
+            if isinstance(names, list) for name in names}
+
+
+def assign_groups(names, sectors, theme_of: dict) -> list:
+    """테마(themes.json) 우선, 없으면 KRX 업종, 그것도 없으면 '기타'."""
+    out = []
+    for n, sec in zip(names, sectors):
+        out.append(theme_of.get(n) or (sec if isinstance(sec, str) and sec else "기타"))
+    return out
+
+
+def mark_leaders(df: pd.DataFrame) -> pd.DataFrame:
+    """그룹별로 거래대금이 가장 큰 종목을 대장주로 표시('대장' 컬럼). '기타'는 제외."""
+    df = df.copy()
+    top = df.groupby("그룹")["거래대금(억)"].transform("max")
+    df["대장"] = (df["거래대금(억)"] == top) & (df["그룹"] != "기타")
+    return df
+
+
+def sort_results(df: pd.DataFrame) -> pd.DataFrame:
+    """충족수 내림차순, 같으면 등락률 내림차순."""
+    return df.sort_values(["충족수", "등락률"], ascending=[False, False])
+
+
+def score(df: pd.DataFrame, surge: pd.Series) -> pd.DataFrame:
+    df = df.copy()
+    df["최근장대양봉"] = surge
+    df["①거래대금"] = True
+    df["②상대강도"] = df["상대강도"] > 0
+    df["③탄력성"] = (df["고가변동률"] >= 10) | df["최근장대양봉"]
+    df["충족수"] = df[["①거래대금", "②상대강도", "③탄력성"]].sum(axis=1)
+    return df
+
+
+def group_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """그룹별 요약: 대장주, 대장 등락률, 종목 수, 3조건 충족 수. 충족 많은 그룹 먼저."""
+    rows = []
+    for g, sub in df.groupby("그룹"):
+        lead = sub.sort_values("거래대금(억)", ascending=False).iloc[0]
+        rows.append({
+            "그룹": g, "대장주": lead["종목명"], "대장등락률": lead["등락률"],
+            "대장거래대금(억)": lead["거래대금(억)"], "종목수": len(sub),
+            "3조건충족": int((sub["충족수"] == 3).sum()), "최대충족수": int(sub["충족수"].max()),
+        })
+    out = pd.DataFrame(rows)
+    return out.sort_values(["3조건충족", "최대충족수", "대장등락률"], ascending=False) if len(out) else out
+
+
 # ---------------------------------------------------------------- data access
 def _stock():
     try:
@@ -98,6 +158,17 @@ def ensure_krx_login():
         sys.exit("환경변수 KRX_ID, KRX_PW 를 설정하세요.")
     os.environ["KRX_ID"] = input("KRX 아이디: ").strip()
     os.environ["KRX_PW"] = getpass.getpass("KRX 비밀번호(입력 내용은 화면에 안 보임): ")
+
+
+def fetch_sectors(stock, base: str) -> pd.Series:
+    """티커 -> KRX 업종명. 실패하면 빈 Series(그룹은 '기타' 또는 테마로 처리)."""
+    parts = []
+    for market in INDEX_CODE:
+        try:
+            parts.append(stock.get_market_sector_classifications(base, market)["업종명"])
+        except Exception as e:  # 네트워크/인증/스키마 변경 등
+            print(f"  (업종 정보를 가져오지 못했습니다: {market}: {e})")
+    return pd.concat(parts) if parts else pd.Series(dtype=object)
 
 
 def trading_days(stock, end: str, n: int) -> list:
@@ -133,20 +204,38 @@ def run(args) -> pd.DataFrame:
         df["시장"] = market
         rows.append(df)
 
+    rows = [r for r in rows if len(r)]
+    if not rows:
+        sys.exit("거래대금 조건을 넘는 종목이 없습니다. --min-value 를 낮춰 보세요.")
     df = pd.concat(rows).sort_values("거래대금(억)", ascending=False).head(args.top)
     df["종목명"] = [stock.get_market_ticker_name(t) for t in df.index]
 
     start20 = days[-min(len(days), 40)]
-    surge = []
-    for t in df.index:
-        hist = stock.get_market_ohlcv_by_date(start20, base, t)
-        surge.append(recent_surge_candle(hist, args.surge_days, args.vol_mult, args.body_pct))
-    df["최근장대양봉"] = surge
+    hists = {t: stock.get_market_ohlcv_by_date(start20, base, t) for t in df.index}
 
-    df["①거래대금"] = True
-    df["②상대강도"] = df["상대강도"] > 0
-    df["③탄력성"] = (df["고가변동률"] >= 10) | df["최근장대양봉"]
-    df["충족수"] = df[["①거래대금", "②상대강도", "③탄력성"]].sum(axis=1)
+    levels = SURGE_LEVELS if args.auto else [(args.vol_mult, args.body_pct)]
+    chosen = None
+    for vol_mult, body_pct in levels:
+        surge = pd.Series(
+            {t: recent_surge_candle(h, args.surge_days, vol_mult, body_pct) for t, h in hists.items()}
+        )
+        scored = score(df, surge)
+        hits = int((scored["충족수"] == 3).sum())
+        chosen = (vol_mult, body_pct, scored)
+        if hits >= args.min_hits:
+            break
+    vol_mult, body_pct, df = chosen
+    df["장대양봉기준"] = f"거래량x{vol_mult:g}/{body_pct:g}%"
+    print(f"\n장대양봉 기준: 거래량 {vol_mult:g}배 이상 & 상승 {body_pct:g}% 이상"
+          + (" (충족 종목이 적어 자동 완화)" if (vol_mult, body_pct) != levels[0] else ""))
+
+    funnel = (f"거래대금 상위 {len(df)}종목 중 → ②상대강도 {int(df['②상대강도'].sum())}개, "
+              f"③탄력성 {int(df['③탄력성'].sum())}개, 3조건 모두 {int((df['충족수'] == 3).sum())}개")
+    print(funnel)
+
+    sectors = fetch_sectors(stock, base).reindex(df.index)
+    df["그룹"] = assign_groups(df["종목명"], sectors, load_themes())
+    df = sort_results(mark_leaders(df))
     df.attrs["base"] = base
     return df
 
@@ -158,8 +247,11 @@ def main():
     p.add_argument("--days", type=int, default=5, help="상대강도 비교 거래일 수")
     p.add_argument("--top", type=int, default=30, help="거래대금 상위 N개만 검사")
     p.add_argument("--surge-days", type=int, default=20, help="장대양봉 탐색 기간(거래일)")
-    p.add_argument("--vol-mult", type=float, default=3.0, help="거래량 급증 배수(직전 20일 평균 대비)")
-    p.add_argument("--body-pct", type=float, default=10.0, help="장대양봉 최소 상승률(%%)")
+    p.add_argument("--vol-mult", type=float, default=3.0, help="거래량 급증 배수(--no-auto 일 때 사용)")
+    p.add_argument("--body-pct", type=float, default=10.0, help="장대양봉 최소 상승률(%%) (--no-auto 일 때 사용)")
+    p.add_argument("--no-auto", dest="auto", action="store_false",
+                   help="장대양봉 기준 자동 완화를 끄고 --vol-mult/--body-pct 고정 사용")
+    p.add_argument("--min-hits", type=int, default=3, help="3조건 충족 종목이 이보다 적으면 기준을 단계적으로 완화")
     p.add_argument("--all", action="store_true", help="3조건 모두 충족하지 않는 종목도 출력")
     p.add_argument("--out", help="CSV 저장 경로 (기본: leaders_YYYYMMDD.csv)")
     args = p.parse_args()
@@ -173,12 +265,18 @@ def main():
         sys.exit("날짜 형식이 올바르지 않습니다. 예: 20261014 또는 2026-10-14")
 
     df = run(args)
-    cols = ["시장", "종목명", "종가", "등락률", "거래대금(억)", "고가변동률",
+    df["대장"] = df["대장"].map({True: "★", False: ""})
+    cols = ["그룹", "대장", "시장", "종목명", "종가", "등락률", "거래대금(억)", "고가변동률",
             "Nd수익률", "상대강도", "최근장대양봉", "당일유형", "충족수"]
     show = df if args.all else df[df["충족수"] == 3]
-    pd.set_option("display.width", 200, "display.unicode.east_asian_width", True)
+    pd.set_option("display.width", 220, "display.unicode.east_asian_width", True)
     fmt = show[cols].rename(columns={"Nd수익률": f"{args.days}일수익률"})
-    print("\n" + (fmt.round(2).to_string() if len(fmt) else "3조건 모두 충족한 종목이 없습니다. --all 로 전체 확인"))
+    print("\n[종목 목록: 충족수↓, 등락률↓]")
+    print(fmt.round(2).to_string() if len(fmt) else "3조건 모두 충족한 종목이 없습니다. --all 로 전체 확인")
+
+    summ = group_summary(df.assign(대장=df["대장"] == "★"))
+    print("\n[섹터/테마별 대장주]  (대장 = 그룹 내 거래대금 1위, 스캔한 상위 종목 기준)")
+    print(summ.round(2).to_string(index=False))
 
     out = args.out or f"leaders_{df.attrs['base']}.csv"
     df.to_csv(out, encoding="utf-8-sig")
