@@ -8,6 +8,11 @@ KRX 데이터(pykrx)로 코스피·코스닥 거래대금 상위 종목을 가�
 | ② 상대강도 | 최근 `--days`일(기본 5) 수익률 > 해당 시장 지수 수익률 |
 | ③ 탄력성 | 당일 고가 등락률 ≥ 10% 또는 최근 20일 내 (거래량 ≥ 직전 20일 평균×3 & 상승률 ≥ 10% 양봉) |
 
+## Windows 에서 더블클릭으로 실행
+1. `setup_krx_env.bat` 실행 (최초 1회): KRX 아이디/비밀번호를 입력하면 사용자 환경변수 `KRX_ID`, `KRX_PW` 로 저장됩니다.
+2. `run_scan.bat` 실행: `C:\myinvestapp\leader_scanner` 로 이동해 `python scan.py` 를 실행합니다. 옵션도 그대로 붙일 수 있습니다. 예: `run_scan.bat --date 2026-10-16`, `run_scan.bat --build-themes`
+- 환경변수는 평문으로 사용자 계정에 저장됩니다. 공용 PC 에서는 쓰지 마세요. 지우려면 PowerShell 에서 `[Environment]::SetEnvironmentVariable('KRX_PW',$null,'User')` (KRX_ID 도 동일).
+
 ## 테마 JSON 만들기
 `python scan.py --build-themes` (또는 `--build-themes 200 --date 2026-10-14`): 그날 거래대금 상위 200종목을 업종/테마별로 묶어 `themes_top200_날짜.json` 과 순위 CSV 로 저장합니다. 마음에 드는 그룹을 `themes.json` 에 옮겨 쓰면 분석에 반영됩니다. 업종은 KRX 분류라 "2차전지", "AI 전력" 같은 시장 테마는 직접 `themes.json` 에 적어야 합니다.
 
